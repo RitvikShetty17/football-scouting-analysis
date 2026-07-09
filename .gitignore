@@ -1,0 +1,19 @@
+# Environments
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Secrets
+.env
+
+# Data (raw pulls can be large / re-generatable — don't bloat the repo)
+data/raw/
+data/*.csv
+data/*.parquet
+
+# soccerdata cache
+~/soccerdata/
+
+# OS
+.DS_Store
