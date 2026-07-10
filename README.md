@@ -36,5 +36,5 @@ source venv/bin/activate   # or venv\Scripts\activate on Windows
 pip install -r requirements.txt
 ```
 
-## Day-by-day log
-- **Day 1:** Repo scaffolding, PostgreSQL schema, Understat scraper for Ligue 1 2024-25 player season stats (pivoted from FBref/Eredivisie after FBref's advanced-stats shutdown — see known issues above)
+## Build log
+- Repo scaffolding, PostgreSQL schema, Understat scraper for Ligue 1 2024-25 player season stats (pivoted from FBref/Eredivisie after FBref's advanced-stats shutdown — see known issues above)

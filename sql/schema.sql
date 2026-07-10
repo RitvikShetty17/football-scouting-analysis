@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS player_season_stats (
     UNIQUE(player_id, season)
 );
 
--- Market value + contract info from Transfermarkt (Day 2)
+-- Market value + contract info from Transfermarkt (added once the join logic is built)
 CREATE TABLE IF NOT EXISTS player_market_data (
     market_id           SERIAL PRIMARY KEY,
     player_id           INTEGER REFERENCES players(player_id),

@@ -1,5 +1,5 @@
 """
-Day 1 (rebuilt) - pull Ligue 1 player season stats from Understat.
+Pull Ligue 1 player season stats from Understat.
 
 We moved off FBref because Opta (FBref's data provider) terminated its licensing
 agreement in January 2026, and FBref deleted all advanced stats (xG, xAG, progressive
@@ -60,8 +60,8 @@ def main():
     df = add_per90_columns(df)
     df.to_csv(f"{OUT_DIR}/ligue1_{SEASON}_players.csv", index=False)
 
-    print(f"\nDay 1 pull complete. Files written to {OUT_DIR}/")
-    print("Next (Day 2): name normalization + Transfermarkt join + load into PostgreSQL")
+    print(f"\nData pull complete. Files written to {OUT_DIR}/")
+    print("Next: name normalization + Transfermarkt join + load into PostgreSQL")
 
 
 if __name__ == "__main__":
