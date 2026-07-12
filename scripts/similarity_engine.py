@@ -100,21 +100,19 @@ def compute_value_efficiency(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def find_similar_players(df: pd.DataFrame, target_name: str, top_n: int = 10) -> pd.DataFrame:
-    """Euclidean distance on the percentile-normalized feature vector, restricted
-    to the target's position group. We use Euclidean distance rather than cosine
-    similarity deliberately: cosine similarity only measures a vector's direction,
-    so a player who's uniformly weaker across every stat can still score as
-    'identical' if his stat ratios happen to point the same way. Euclidean
-    distance correctly penalizes that magnitude gap - a clearly worse player ends
-    up further away, not tied for first."""
+def compute_similar_players(df: pd.DataFrame, target_name: str, top_n: int = 10):
+    """Pure computation, no printing - returns (target_row, ranked_pool_df) so both
+    the CLI and the Streamlit app can use the same logic. Uses Euclidean distance
+    on the percentile-normalized feature vector, restricted to the target's
+    position group. We use Euclidean distance rather than cosine similarity
+    deliberately: cosine similarity only measures a vector's direction, so a
+    player who's uniformly weaker across every stat can still score as 'identical'
+    if his stat ratios happen to point the same way. Euclidean distance correctly
+    penalizes that magnitude gap - a clearly worse player ends up further away,
+    not tied for first."""
     matches = df[df["full_name"].str.contains(target_name, case=False, na=False)]
     if matches.empty:
         raise ValueError(f"No player found matching '{target_name}'. Check spelling/accents.")
-    if len(matches) > 1:
-        print(f"[INFO] Multiple matches for '{target_name}', using the first: "
-              f"{matches.iloc[0]['full_name']} ({matches.iloc[0]['team_name']}). "
-              f"Other matches: {', '.join(matches.iloc[1:]['full_name'].tolist())}")
     target = matches.iloc[0]
 
     pctl_cols = [f"{c}_pctl" for c in FEATURE_COLS]
@@ -131,6 +129,16 @@ def find_similar_players(df: pd.DataFrame, target_name: str, top_n: int = 10) ->
     pool["similarity"] = 1 - (distances / max_possible_distance)
 
     pool = pool.sort_values("similarity", ascending=False).head(top_n)
+    other_matches = matches.iloc[1:]["full_name"].tolist() if len(matches) > 1 else []
+
+    return target, pool, other_matches
+
+
+def print_comps(target: pd.Series, pool: pd.DataFrame, other_matches: list, top_n: int = 10):
+    """CLI display wrapper around compute_similar_players' output."""
+    if other_matches:
+        print(f"[INFO] Multiple matches, using: {target['full_name']} ({target['team_name']}). "
+              f"Other matches: {', '.join(other_matches)}")
 
     print(f"\nTarget: {target['full_name']} ({target['team_name']}, {target['position_group']})")
     print(f"  Market value: {'€{:,.0f}'.format(target['market_value_eur']) if pd.notna(target['market_value_eur']) else 'no match found'}")
@@ -164,8 +172,6 @@ def find_similar_players(df: pd.DataFrame, target_name: str, top_n: int = 10) ->
               "denominator here, so a high score doesn't necessarily mean a great find. Compare "
               "efficiency scores within a similar value bracket, not across the whole range.")
 
-    return pool
-
 
 def main():
     if len(sys.argv) < 2:
@@ -190,7 +196,8 @@ def main():
     df = compute_percentiles(df)
     df = compute_value_efficiency(df)
 
-    find_similar_players(df, target_name, top_n=10)
+    target, pool, other_matches = compute_similar_players(df, target_name, top_n=10)
+    print_comps(target, pool, other_matches, top_n=10)
 
 
 if __name__ == "__main__":
