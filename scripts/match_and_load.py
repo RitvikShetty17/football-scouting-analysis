@@ -1,5 +1,5 @@
 """
-Match Understat player-season stats against Transfermarkt market value/contract
+Match Understat player-season stats against Transfermarkt market value/birth-date
 data, then load both into PostgreSQL per sql/schema.sql.
 
 Why this needs fuzzy matching rather than an exact join: the two sources spell
@@ -8,11 +8,16 @@ nicknames vs full legal names). We match name-first within the same club where
 possible, and record a match_confidence score for every row so low-confidence
 matches can be reviewed rather than silently trusted - this mirrors the kind of
 entity-resolution QA step used in the PurposeTech grant-data pipeline.
+
+Note: contract_expiry is NOT populated - Transfermarkt's squad-table view doesn't
+include contract dates (confirmed by inspecting the actual page structure), only
+birth date, joined date, and transfer history. Getting contract data would require
+scraping each player's individual profile page - documented as future work.
 """
 
 import os
 import re
-from datetime import datetime
+import html
 
 import pandas as pd
 from unidecode import unidecode
@@ -26,35 +31,10 @@ UNDERSTAT_FILE = "data/raw/ligue1_2024_players.csv"
 TRANSFERMARKT_FILE = "data/raw/transfermarkt_ligue1_2024.csv"
 SEASON_LABEL = "2024-25"
 
-# Only auto-accept matches at 93+; anything below is flagged or rejected
-NAME_MATCH_THRESHOLD = 85   # minimum score to consider a candidate
-AUTO_ACCEPT_THRESHOLD = 93  # score at or above this is trusted without review
-
-# Manual overrides: understat name (normalized) -> transfermarkt name (normalized)
-# Use this to fix known bad fuzzy matches and known unmatched players.
-MANUAL_OVERRIDES = {
-    # Bad fuzzy matches caught in review
-    "jonathan christian david": "jonathan david",
-    "hamed junior traore": "hamed traore",
-    "remy labeau lascary": None,          # no valid TM match - exclude
-    "mohamed bayo": None,                 # no valid TM match - exclude
-    "theo bair": None,                    # no valid TM match - exclude
-    "jordan siebatcheu": None,            # no valid TM match - exclude
-    "fode toure": None,                   # no valid TM match - exclude
-    "david pereira da costa": None,       # no valid TM match - exclude
-    "ange tia": None,                     # no valid TM match - exclude
-    # Known unmatched players with correct TM spellings
-    "mathis cherki": "mathis cherki",
-    "neal maupay": "neal maupay",
-    "randal kolo muani": "randal kolo muani",
-    "amine harit": "amine harit",
-    "seko fofana": "seko fofana",
-    "jeremie boga": "jeremie boga",
-    "duje caleta-car": "duje caleta car",
-    "albert gronbaek": "albert gronbaek",
-}
+NAME_MATCH_THRESHOLD = 85  # rapidfuzz score (0-100) below which we don't accept a match
 
 # Manual aliases for club names that won't fuzzy-match cleanly on their own.
+# Add to this as you spot mismatches in the unmatched-team report.
 TEAM_ALIASES = {
     "paris saint germain": "psg",
     "paris sg": "psg",
@@ -64,23 +44,16 @@ TEAM_ALIASES = {
 
 
 def normalize_name(name: str) -> str:
-    """Lowercase, strip accents, remove punctuation - for both player and club names."""
+    """Lowercase, strip accents, unescape HTML entities, remove punctuation.
+    Understat's API returns names with HTML entities un-decoded (e.g. "M&#039;Bala"
+    instead of "M'Bala"), which would otherwise cause false near-misses in matching."""
     if pd.isna(name):
         return ""
-    name = unidecode(str(name)).lower()
+    name = html.unescape(str(name))
+    name = unidecode(name).lower()
     name = re.sub(r"[^\w\s]", "", name)
     name = re.sub(r"\s+", " ", name).strip()
     return TEAM_ALIASES.get(name, name)
-
-
-def parse_contract_date(raw: str):
-    """Transfermarkt's detailed view formats contract expiry like 'Jun 30, 2027'."""
-    if pd.isna(raw) or not raw:
-        return None
-    try:
-        return datetime.strptime(raw.strip(), "%b %d, %Y").date()
-    except ValueError:
-        return None
 
 
 def match_players(understat_df: pd.DataFrame, tm_df: pd.DataFrame) -> pd.DataFrame:
@@ -89,39 +62,10 @@ def match_players(understat_df: pd.DataFrame, tm_df: pd.DataFrame) -> pd.DataFra
     tm_df["norm_name"] = tm_df["player_name"].apply(normalize_name)
     tm_df["norm_team"] = tm_df["club"].apply(normalize_name)
 
-    # Build a lookup from normalized TM name -> TM row for manual override resolution
-    tm_by_norm_name = tm_df.set_index("norm_name")
-
     matches = []
     unmatched = []
-    review = []
 
     for _, u_row in understat_df.iterrows():
-        u_norm = u_row["norm_name"]
-
-        # Check manual overrides first
-        if u_norm in MANUAL_OVERRIDES:
-            override_target = MANUAL_OVERRIDES[u_norm]
-            if override_target is None:
-                # Explicitly excluded - treat as unmatched (no market value)
-                unmatched.append(u_row["player_name"])
-                continue
-            if override_target in tm_by_norm_name.index:
-                tm_row = tm_by_norm_name.loc[override_target]
-                if isinstance(tm_row, pd.DataFrame):
-                    tm_row = tm_row.iloc[0]
-                matches.append({
-                    "understat_name": u_row["player_name"],
-                    "transfermarkt_name": tm_row["player_name"],
-                    "team": u_row["team_title"],
-                    "match_confidence": 1.0,
-                    "matched_within_team": True,
-                    "market_value_eur": tm_row["market_value_eur"],
-                    "contract_expiry": parse_contract_date(tm_row["contract_expiry_raw"]),
-                })
-                continue
-            # Override target not found in TM data - fall through to fuzzy
-        
         # Prefer matching within the same (normalized) team first
         same_team_candidates = tm_df[tm_df["norm_team"] == u_row["norm_team"]]
         candidates = same_team_candidates if len(same_team_candidates) > 0 else tm_df
@@ -131,30 +75,19 @@ def match_players(understat_df: pd.DataFrame, tm_df: pd.DataFrame) -> pd.DataFra
             continue
 
         best = process.extractOne(
-            u_norm, candidates["norm_name"], scorer=fuzz.WRatio
+            u_row["norm_name"], candidates["norm_name"], scorer=fuzz.WRatio
         )
 
         if best and best[1] >= NAME_MATCH_THRESHOLD:
             tm_row = candidates.iloc[best[2]]
-            confidence = round(best[1] / 100, 3)
-
-            if confidence < AUTO_ACCEPT_THRESHOLD / 100:
-                # Below auto-accept: flag for review but still include
-                review.append({
-                    "understat_name": u_row["player_name"],
-                    "transfermarkt_name": tm_row["player_name"],
-                    "team": u_row["team_title"],
-                    "confidence": confidence,
-                })
-
             matches.append({
                 "understat_name": u_row["player_name"],
                 "transfermarkt_name": tm_row["player_name"],
                 "team": u_row["team_title"],
-                "match_confidence": confidence,
+                "match_confidence": round(best[1] / 100, 3),
                 "matched_within_team": len(same_team_candidates) > 0,
                 "market_value_eur": tm_row["market_value_eur"],
-                "contract_expiry": parse_contract_date(tm_row["contract_expiry_raw"]),
+                "birth_date": tm_row.get("birth_date"),
             })
         else:
             unmatched.append(u_row["player_name"])
@@ -163,19 +96,21 @@ def match_players(understat_df: pd.DataFrame, tm_df: pd.DataFrame) -> pd.DataFra
 
     print(f"Matched: {len(match_df)} / {len(understat_df)} Understat players "
           f"({len(match_df) / len(understat_df) * 100:.1f}%)")
-
     if unmatched:
-        print(f"Unmatched ({len(unmatched)}) - no market value data for these:")
+        print(f"Unmatched ({len(unmatched)}) - review manually, these won't have "
+              f"market value data:")
         for name in unmatched[:20]:
             print(f"  - {name}")
         if len(unmatched) > 20:
             print(f"  ... and {len(unmatched) - 20} more")
 
-    if review:
-        print(f"\n[REVIEW SUGGESTED] {len(review)} matches below {AUTO_ACCEPT_THRESHOLD} confidence:")
-        for r in review:
-            print(f"  - '{r['understat_name']}' -> '{r['transfermarkt_name']}' "
-                  f"(team: {r['team']}, confidence: {r['confidence']})")
+    low_confidence = match_df[match_df["match_confidence"] < 0.92]
+    if len(low_confidence) > 0:
+        print(f"\n[REVIEW SUGGESTED] {len(low_confidence)} matches scored between "
+              f"{NAME_MATCH_THRESHOLD}-92 confidence - spot-check these before trusting them:")
+        for _, row in low_confidence.iterrows():
+            print(f"  - '{row['understat_name']}' -> '{row['transfermarkt_name']}' "
+                  f"(team: {row['team']}, confidence: {row['match_confidence']})")
 
     return match_df
 
@@ -205,11 +140,17 @@ def load_to_postgres(understat_df: pd.DataFrame, match_df: pd.DataFrame):
             team_ids[team_name] = result.scalar()
 
         for _, row in understat_df.iterrows():
+            birth_date = None
+            if row["player_name"] in match_lookup.index:
+                m = match_lookup.loc[row["player_name"]]
+                birth_date = m.get("birth_date") if pd.notna(m.get("birth_date")) else None
+
             player_result = conn.execute(
                 text("""
-                    INSERT INTO players (understat_id, full_name, normalized_name, position, team_id)
-                    VALUES (:uid, :name, :norm_name, :position, :team_id)
-                    ON CONFLICT (understat_id) DO UPDATE SET full_name = EXCLUDED.full_name
+                    INSERT INTO players (understat_id, full_name, normalized_name, position, birth_date, team_id)
+                    VALUES (:uid, :name, :norm_name, :position, :birth_date, :team_id)
+                    ON CONFLICT (understat_id) DO UPDATE SET
+                        full_name = EXCLUDED.full_name, birth_date = EXCLUDED.birth_date
                     RETURNING player_id
                 """),
                 {
@@ -217,6 +158,7 @@ def load_to_postgres(understat_df: pd.DataFrame, match_df: pd.DataFrame):
                     "name": row["player_name"],
                     "norm_name": row["norm_name"],
                     "position": row.get("position"),
+                    "birth_date": birth_date,
                     "team_id": team_ids[row["team_title"]],
                 },
             )
@@ -257,12 +199,12 @@ def load_to_postgres(understat_df: pd.DataFrame, match_df: pd.DataFrame):
                 conn.execute(
                     text("""
                         INSERT INTO player_market_data
-                            (player_id, as_of_date, market_value_eur, contract_expiry, match_confidence)
-                        VALUES (:player_id, CURRENT_DATE, :value, :expiry, :confidence)
+                            (player_id, as_of_date, market_value_eur, match_confidence)
+                        VALUES (:player_id, CURRENT_DATE, :value, :confidence)
                     """),
                     {
                         "player_id": player_id, "value": m["market_value_eur"],
-                        "expiry": m["contract_expiry"], "confidence": m["match_confidence"],
+                        "confidence": m["match_confidence"],
                     },
                 )
 
@@ -273,6 +215,13 @@ def load_to_postgres(understat_df: pd.DataFrame, match_df: pd.DataFrame):
 def main():
     understat_df = pd.read_csv(UNDERSTAT_FILE)
     tm_df = pd.read_csv(TRANSFERMARKT_FILE)
+
+    # Understat's API leaves names HTML-escaped (e.g. "M&#039;Bala Nzola") - clean
+    # this up before anything else touches player_name, so both the matching logic
+    # and any printed/reported names are correct.
+    understat_df["player_name"] = understat_df["player_name"].apply(
+        lambda n: html.unescape(str(n)) if pd.notna(n) else n
+    )
 
     print(f"Understat players: {len(understat_df)}")
     print(f"Transfermarkt players: {len(tm_df)}\n")

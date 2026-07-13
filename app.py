@@ -1,13 +1,15 @@
 """
-Streamlit UI for the Undervalued Talent Finder.
+Streamlit UI for ValueScout.
 
 Reuses the exact same computation functions as the CLI (scripts/similarity_engine.py)
 rather than reimplementing any logic here - the app is a thin display layer over
 the same tested pipeline.
 
-Known gap: there's no age filter here because we never scraped player age into
-either data source. Adding it would mean re-scraping Transfermarkt's squad pages
-for the birth-date column - noted as a follow-up, not silently faked.
+Known gap: contract expiry isn't available. Transfermarkt's squad-table view only
+has birth date, joined date, and transfer history - not contract dates. Getting
+that would mean scraping every player's individual profile page (~600 extra
+requests), deferred as documented future work. Age IS available and used here,
+via the birth_date column added after inspecting the real page structure.
 """
 
 import os
@@ -23,7 +25,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
 from similarity_engine import (
     FEATURE_COLS,
     MIN_MINUTES,
-    CONTRACT_WARNING_MONTHS,
     load_player_pool,
     prepare_pool,
     compute_percentiles,
@@ -33,7 +34,7 @@ from similarity_engine import (
 
 load_dotenv()
 
-st.set_page_config(page_title="Undervalued Talent Finder", layout="wide")
+st.set_page_config(page_title="ValueScout", layout="wide")
 
 
 @st.cache_data(ttl=3600)
@@ -81,10 +82,10 @@ def build_radar_chart(target: pd.Series, comps: pd.DataFrame, top_k: int = 3):
 
 
 def main():
-    st.title("Undervalued Talent Finder")
+    st.title("ValueScout")
     st.caption(
         "Ligue 1, 2024-25 - statistical comps via Understat (xG/xA/npxG) + "
-        "Transfermarkt (value/contracts). Attack/creation stats only - see the "
+        "Transfermarkt (value/age). Attack/creation stats only - see the "
         "sidebar note on defenders."
     )
 
@@ -102,14 +103,19 @@ def main():
             value=float(max_value_available / 1_000_000) if pd.notna(max_value_available) else 100.0,
             step=0.5,
         )
-        contract_urgent_only = st.checkbox(
-            f"Only show players with <{CONTRACT_WARNING_MONTHS} months left on contract", value=False
+        age_range = st.slider(
+            "Age range",
+            min_value=int(df["age"].min()) if df["age"].notna().any() else 15,
+            max_value=int(df["age"].max()) + 1 if df["age"].notna().any() else 45,
+            value=(15, 45),
         )
 
         st.divider()
         st.caption(
-            "**Known gap:** no age filter yet - player age wasn't captured from "
-            "either data source. See README known-issues log."
+            "**Known gap:** contract expiry isn't available - Transfermarkt's squad "
+            "page doesn't include it (only birth date, joined date, transfer history). "
+            "Getting it would mean scraping every player's individual profile page. "
+            "See README known-issues log."
         )
         st.caption(
             f"Players below {MIN_MINUTES} minutes played are excluded (too noisy "
@@ -138,18 +144,16 @@ def main():
     filtered_pool = pool[
         pool["market_value_eur"].isna() | (pool["market_value_eur"] / 1_000_000 <= budget_ceiling)
     ]
-    if contract_urgent_only:
-        now = pd.Timestamp.now()
-        filtered_pool = filtered_pool[
-            filtered_pool["contract_expiry"].notna()
-            & ((pd.to_datetime(filtered_pool["contract_expiry"]) - now).dt.days / 30 <= CONTRACT_WARNING_MONTHS)
-            & ((pd.to_datetime(filtered_pool["contract_expiry"]) - now).dt.days > 0)
-        ]
+    filtered_pool = filtered_pool[
+        filtered_pool["age"].isna()
+        | ((filtered_pool["age"] >= age_range[0]) & (filtered_pool["age"] <= age_range[1]))
+    ]
 
     col1, col2 = st.columns([1, 2])
     with col1:
         st.subheader(target["full_name"])
-        st.write(f"{target['team_name']} · {target['position_group']}")
+        age_display = f"{target['age']:.0f}" if pd.notna(target.get("age")) else "unknown"
+        st.write(f"{target['team_name']} · {target['position_group']} · age {age_display}")
         st.metric("Market value", format_eur(target["market_value_eur"]))
         st.write(
             f"**Per-90:** {target['goals_per90']:.2f}G  {target['assists_per90']:.2f}A  "
@@ -177,10 +181,10 @@ def main():
         return
 
     display_df = filtered_pool[[
-        "full_name", "team_name", "similarity", "market_value_eur",
-        "value_efficiency", "contract_expiry",
+        "full_name", "team_name", "similarity", "age", "market_value_eur",
+        "value_efficiency",
     ]].copy()
-    display_df.columns = ["Player", "Team", "Similarity", "Market Value (€)", "Value Efficiency", "Contract Expiry"]
+    display_df.columns = ["Player", "Team", "Similarity", "Age", "Market Value (€)", "Value Efficiency"]
     display_df["Similarity"] = display_df["Similarity"].round(3)
     display_df["Value Efficiency"] = display_df["Value Efficiency"].round(1)
 

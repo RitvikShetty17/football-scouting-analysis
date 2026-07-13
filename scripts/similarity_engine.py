@@ -25,7 +25,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 MIN_MINUTES = 450  # ~5 full matches - below this, per-90 rates are too noisy to trust
-CONTRACT_WARNING_MONTHS = 12  # flag as "higher acquisition leverage" within this window
 
 POSITION_GROUP_MAP = {"GK": "Goalkeeper", "D": "Defender", "M": "Midfielder", "F": "Forward"}
 
@@ -50,10 +49,10 @@ def load_player_pool(engine) -> pd.DataFrame:
     """Pull players + season stats + market data (left join - not everyone matched
     to a Transfermarkt record) from PostgreSQL."""
     query = text("""
-        SELECT p.player_id, p.full_name, p.position, t.team_name,
+        SELECT p.player_id, p.full_name, p.position, p.birth_date, t.team_name,
                s.minutes_played, s.goals_per90, s.assists_per90, s.xg_per90,
                s.xa_per90, s.npxg_per90,
-               m.market_value_eur, m.contract_expiry, m.match_confidence
+               m.market_value_eur, m.match_confidence
         FROM players p
         JOIN player_season_stats s ON p.player_id = s.player_id
         LEFT JOIN teams t ON p.team_id = t.team_id
@@ -61,6 +60,9 @@ def load_player_pool(engine) -> pd.DataFrame:
     """)
     with engine.connect() as conn:
         df = pd.read_sql(query, conn)
+    if "birth_date" in df.columns:
+        df["birth_date"] = pd.to_datetime(df["birth_date"], errors="coerce")
+        df["age"] = ((pd.Timestamp.now() - df["birth_date"]).dt.days / 365.25).round(1)
     return df
 
 
@@ -140,7 +142,8 @@ def print_comps(target: pd.Series, pool: pd.DataFrame, other_matches: list, top_
         print(f"[INFO] Multiple matches, using: {target['full_name']} ({target['team_name']}). "
               f"Other matches: {', '.join(other_matches)}")
 
-    print(f"\nTarget: {target['full_name']} ({target['team_name']}, {target['position_group']})")
+    print(f"\nTarget: {target['full_name']} ({target['team_name']}, {target['position_group']}, "
+          f"age {target['age'] if pd.notna(target.get('age')) else 'unknown'})")
     print(f"  Market value: {'€{:,.0f}'.format(target['market_value_eur']) if pd.notna(target['market_value_eur']) else 'no match found'}")
     print(f"  Per-90: {target['goals_per90']:.2f}G {target['assists_per90']:.2f}A "
           f"{target['xg_per90']:.2f}xG {target['xa_per90']:.2f}xA\n")
@@ -159,13 +162,9 @@ def print_comps(target: pd.Series, pool: pd.DataFrame, other_matches: list, top_
         low_value_flag = ""
         if pd.notna(row["market_value_eur"]) and row["market_value_eur"] < 1_000_000 and pd.notna(row["value_efficiency"]):
             low_value_flag = "*"
-        contract_flag = ""
-        if pd.notna(row["contract_expiry"]):
-            months_left = (pd.Timestamp(row["contract_expiry"]) - pd.Timestamp.now()).days / 30
-            if 0 < months_left <= CONTRACT_WARNING_MONTHS:
-                contract_flag = "  [CONTRACT EXPIRING SOON]"
+        age_str = f"age {row['age']:.0f}" if pd.notna(row.get("age")) else "age n/a"
         print(f"  sim={row['similarity']:.3f}  {row['full_name']:<25} ({row['team_name']:<20}) "
-              f"{value_str:<15}{efficiency_str}{low_value_flag:<12}{contract_flag}")
+              f"{value_str:<15}{efficiency_str}{low_value_flag:<8}{age_str}")
 
     if (pool["market_value_eur"] < 1_000_000).any():
         print("\n  * = market value under €1M - efficiency ratio is distorted by a very small "

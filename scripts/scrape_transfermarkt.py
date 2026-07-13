@@ -14,6 +14,7 @@ per club rather than needing a second scrape for contract data.
 
 import time
 import re
+from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
@@ -103,8 +104,29 @@ def parse_market_value(value_text: str) -> float:
         return None
 
 
+def parse_birth_date(text: str):
+    """Transfermarkt's birth-date cell looks like '25/02/1999 (26)' - date first,
+    age in parens. We only need the date; age can always be recomputed from it."""
+    if not text:
+        return None
+    match = re.match(r"(\d{2}/\d{2}/\d{4})", text.strip())
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%d/%m/%Y").date().isoformat()
+    except ValueError:
+        return None
+
+
 def scrape_club_squad(club: dict) -> list[dict]:
-    """Scrape one club's detailed squad table (market value + contract expiry)."""
+    """Scrape one club's squad table: position, birth date, nationality, market value.
+
+    Note: contract expiry is NOT available from this table - confirmed by inspecting
+    the actual page structure (see inspect_page.py, since deleted). The /plus/1 view
+    adds transfer-history columns (joined date, signed-from club), not contract data.
+    Getting contract expiry would require scraping each player's individual profile
+    page - deferred as documented future work rather than attempted here.
+    """
     url = f"{BASE_URL}/{club['slug']}/kader/verein/{club['club_id']}/saison_id/{SEASON_ID}/plus/1"
     resp = get_with_retries(url)
     soup = BeautifulSoup(resp.text, "lxml")
@@ -123,18 +145,17 @@ def scrape_club_squad(club: dict) -> list[dict]:
             position = position_cell.text.strip() if position_cell else None
 
             all_cells = row.select("td")
-            # Market value is consistently the last cell with class 'rechts'
             market_value_cell = row.select_one("td.rechts.hauptlink")
             market_value = parse_market_value(market_value_cell.text.strip()) if market_value_cell else None
 
-            # Contract expiry - present as a date-formatted cell in the /plus/1 detailed view.
-            # We match on the cell's text pattern (e.g. "Jun 30, 2027") rather than a fixed
-            # column index, since column order can shift between Transfermarkt's table variants.
-            contract_expiry = None
+            # Birth date is a plain 'zentriert' cell matching DD/MM/YYYY (age) -
+            # matched by pattern rather than fixed index, since column order can
+            # shift between Transfermarkt's table variants.
+            birth_date = None
             for cell in all_cells:
-                text = cell.text.strip()
-                if re.match(r"[A-Z][a-z]{2} \d{1,2}, \d{4}", text):
-                    contract_expiry = text
+                cell_text = cell.text.strip()
+                if re.match(r"\d{2}/\d{2}/\d{4} \(\d+\)", cell_text):
+                    birth_date = parse_birth_date(cell_text)
                     break
 
             nationality_imgs = name_cell.find_next("td").select("img") if name_cell.find_next("td") else []
@@ -146,7 +167,7 @@ def scrape_club_squad(club: dict) -> list[dict]:
                     "position": position,
                     "nationality": nationality,
                     "market_value_eur": market_value,
-                    "contract_expiry_raw": contract_expiry,
+                    "birth_date": birth_date,
                     "club": club["club_name"],
                 })
         except Exception as e:
@@ -196,8 +217,8 @@ def main():
     print(f"\nTotal players scraped: {len(df)}")
     print(f"Players with a market value: {df['market_value_eur'].notna().sum()} "
           f"({df['market_value_eur'].notna().mean()*100:.0f}%)")
-    print(f"Players with a contract expiry date: {df['contract_expiry_raw'].notna().sum()} "
-          f"({df['contract_expiry_raw'].notna().mean()*100:.0f}%)")
+    print(f"Players with a birth date: {df['birth_date'].notna().sum()} "
+          f"({df['birth_date'].notna().mean()*100:.0f}%)")
     if failed_clubs:
         print(f"\n[INCOMPLETE] {len(failed_clubs)} club(s) failed and are missing from "
               f"this data: {', '.join(failed_clubs)}")

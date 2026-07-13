@@ -1,4 +1,4 @@
--- Undervalued Talent Finder — schema v2
+-- ValueScout — schema v2
 -- Data sources: Understat (advanced per-season stats) + Transfermarkt (value/contracts)
 -- League scope: Ligue 1 (switched from Eredivisie after FBref's Jan 2026 advanced-stats
 -- shutdown left no reliable free source for Eredivisie xG data; Understat only covers
@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS players (
     full_name            VARCHAR(150) NOT NULL,
     normalized_name       VARCHAR(150) NOT NULL,     -- lowercased, accent-stripped, for Transfermarkt name matching
     position              VARCHAR(20),
+    birth_date            DATE,                      -- from Transfermarkt's squad table (DD/MM/YYYY format)
     team_id               INTEGER REFERENCES teams(team_id)
 );
 
@@ -51,6 +52,10 @@ CREATE TABLE IF NOT EXISTS player_season_stats (
 );
 
 -- Market value + contract info from Transfermarkt (added once the join logic is built)
+-- NOTE: contract_expiry is currently always NULL. Transfermarkt's squad-table view
+-- doesn't include contract dates (only birth date, joined date, and transfer history)
+-- - getting contract expiry would require scraping each player's individual profile
+-- page (~600 extra requests), deferred as future work rather than done now.
 CREATE TABLE IF NOT EXISTS player_market_data (
     market_id           SERIAL PRIMARY KEY,
     player_id           INTEGER REFERENCES players(player_id),
