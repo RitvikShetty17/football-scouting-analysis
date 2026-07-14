@@ -1,43 +1,147 @@
-# ValueScout
+# ⚽ ValueScout — Football Player Similarity Engine
 
-A statistical scouting tool that identifies cheaper, statistically-similar alternatives to a target player — built to mirror the kind of similarity/value analysis real recruitment analytics departments run.
+![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-336791?style=for-the-badge&logo=postgresql&logoColor=white)
+![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)
+![Plotly](https://img.shields.io/badge/Plotly-3F4F75?style=for-the-badge&logo=plotly&logoColor=white)
 
-**Status:** Core pipeline + similarity engine + Streamlit UI working end-to-end. Refinements ongoing.
+A statistical scouting tool that identifies cheaper, statistically-similar alternatives to a target player — built to mirror the kind of similarity and value analysis used by real recruitment analytics departments.
 
-## Data sources
-- **Understat** — per-season advanced stats (xG, xA, npxG, xGChain, xGBuildup) via the `understatapi` package
-- **Transfermarkt** — market value, age (contract expiry not available - see known issues log)
+**Scope:** Ligue 1, 2024–25 season · ~600 players across 18 clubs
 
-## Scope (v1)
-- League: Ligue 1
-- Season: 2024–25
+---
 
-## Known issues log
-- **FBref advanced stats shutdown (Jan 2026):** this project originally targeted FBref + Eredivisie. On Jan 20, 2026, FBref's data provider (Opta/Stats Perform) terminated their licensing agreement and required FBref to delete all advanced stats (xG, xAG, progressive passes, shot creation) site-wide. FBref now only retains basic stats (goals, assists, cards). We migrated to **Understat** for advanced stats, which required switching league scope from Eredivisie to **Ligue 1**, since Understat only covers the Big-5 leagues + RFPL. See `scripts/scrape_understat.py` header for details.
-- **Transfermarkt squad pages reflect the current roster, not the historical one:** even when requesting a past `saison_id`, a club's squad page shows players currently registered to that club - not who played there during that season. Players who scored Understat stats for a Ligue 1 club in 2024-25 but have since transferred elsewhere won't appear in any Ligue 1 club's Transfermarkt squad, so they end up with no market value match. This affects roughly 15% of players and is a structural limitation of scraping current-squad pages rather than a bug - see the unmatched-player report `scripts/match_and_load.py` prints for the current list.
-- **The similarity engine is attack/creation-focused only:** Understat provides goals, xG, assists, xA, shots, and key passes - no tackles, interceptions, aerial duels, or other defensive metrics. This means the tool is meaningfully more informative for forwards and attacking midfielders than for defenders, whose defensive contribution is invisible to this stat set. Worth stating explicitly in any pitch of this tool rather than letting it be an unstated blind spot.
-- **Contract expiry is not available:** initially assumed Transfermarkt's `/plus/1` squad view included contract dates - it doesn't (confirmed by inspecting the actual page HTML). That view only adds transfer-history columns (joined date, signed-from club). Getting contract expiry would require scraping each player's individual profile page (~600 extra requests instead of ~18), deferred as documented future work. Birth date, however, IS in that view and is used for the age filter/display.
+## 🎯 What It Does
 
-## Why Ligue 1 (after the pivot)
-Ligue 1 has a strong reputation as a development/selling league (Monaco, Lille, Rennes), which keeps the original "find a cheaper version of Player X" scouting narrative intact even after the source/league change.
+Given any Ligue 1 player, ValueScout:
 
-## Project structure
+1. **Finds statistical twins** — players with a similar attacking output profile (goals, xG, assists, xA, npxG per 90) using Euclidean distance on position-group percentile rankings
+2. **Ranks by value efficiency** — surfaces players who deliver similar output at a lower market value (the "undervalued player" signal)
+3. **Visualizes the comparison** — radar charts overlaying the target player against their top comps
+4. **Filters by budget and age** — interactive sidebar to simulate real scouting constraints
+
+---
+
+## 🏗️ Architecture
+
 ```
-football-scouting-analytics/
-├── data/           # raw + processed data (gitignored, not committed)
-├── scripts/        # scraping + processing scripts
-├── sql/            # schema + queries
-├── notebooks/       # exploration notebooks
+Understat API                  Transfermarkt (web scrape)
+(xG, xA, npxG, goals,         (market value, age,
+ assists, shots, key passes)    nationality, position)
+        │                               │
+        ▼                               ▼
+scrape_understat.py            scrape_transfermarkt.py
+        │                               │
+        └──────────┬────────────────────┘
+                   ▼
+          match_and_load.py
+     (rapidfuzz name matching +
+      PostgreSQL load)
+                   │
+                   ▼
+            PostgreSQL DB
+     (teams, players, player_season_stats,
+      player_market_data)
+                   │
+                   ▼
+        similarity_engine.py
+   (position normalization, percentile
+    ranking, Euclidean distance, value
+    efficiency scoring)
+                   │
+                   ▼
+              app.py
+         (Streamlit UI +
+          Plotly radar charts)
+```
+
+---
+
+## 🛠️ Tech Stack
+
+| Layer | Tool | Purpose |
+|---|---|---|
+| Data Collection | `understatapi`, `requests`, `BeautifulSoup` | Pull player stats from Understat; scrape Transfermarkt squad pages |
+| Name Matching | `rapidfuzz` | Fuzzy entity resolution between Understat and Transfermarkt player names |
+| Storage | PostgreSQL + SQLAlchemy | 4-table normalized schema (teams, players, season stats, market data) |
+| Similarity Engine | NumPy, Pandas | Euclidean distance on position-group percentile vectors |
+| UI | Streamlit + Plotly | Interactive radar charts, budget/age filters, comp tables |
+
+---
+
+## 📂 Project Structure
+
+```
+football-scouting-analysis/
+├── scripts/
+│   ├── scrape_understat.py       # Pull Ligue 1 player stats via understatapi
+│   ├── scrape_transfermarkt.py   # Scrape market value + birth date per club
+│   ├── match_and_load.py         # Fuzzy name matching + PostgreSQL load
+│   └── similarity_engine.py      # Core similarity engine (CLI + shared logic)
+├── sql/
+│   └── schema.sql                # PostgreSQL schema (4 tables + indexes)
+├── app.py                        # Streamlit UI
 ├── requirements.txt
-└── README.md
+└── .env.example                  # DB connection + API key template
 ```
 
-## Setup
+---
+
+## 🔍 How the Similarity Engine Works
+
+1. **Filter** — players with fewer than 450 minutes played are excluded (per-90 rates are too noisy below ~5 full matches)
+2. **Position grouping** — each player's primary position is parsed from Understat's frequency-ordered position codes (GK / D / M / F)
+3. **Percentile ranking** — each stat is percentile-ranked **within position group**, so a striker's xG/90 is compared fairly against other strikers, not against the whole league
+4. **Euclidean distance** — computed on the 5-dimensional percentile vector. Euclidean distance is used over cosine similarity deliberately: cosine only measures vector direction, so a uniformly weaker player can still score as "identical" if his stat ratios happen to match — Euclidean distance correctly penalizes that magnitude gap
+5. **Value efficiency** — composite output percentile ÷ market value (€M) — higher score = more output per euro
+
+---
+
+## 📊 Database Schema
+
+| Table | Key Columns |
+|---|---|
+| `teams` | team_id, team_name, league, season |
+| `players` | player_id, full_name, normalized_name, position, birth_date, team_id |
+| `player_season_stats` | goals, assists, xg, xa, npxg, xg_chain, xg_buildup, per-90 versions of all |
+| `player_market_data` | market_value_eur, as_of_date, match_confidence |
+
+---
+
+## 🚀 Setup
+
 ```bash
+# Clone and install
+git clone https://github.com/RitvikShetty17/football-scouting-analysis
+cd football-scouting-analysis
 python -m venv venv
-source venv/bin/activate   # or venv\Scripts\activate on Windows
+source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
+
+# Configure environment
+cp .env.example .env
+# Edit .env → add DATABASE_URL (PostgreSQL connection string)
+
+# Run the pipeline
+python scripts/scrape_understat.py         # Pull Understat stats
+python scripts/scrape_transfermarkt.py     # Scrape Transfermarkt
+python scripts/match_and_load.py           # Match names + load to PostgreSQL
+
+# Launch the app
+streamlit run app.py
 ```
 
-## Build log
-- Repo scaffolding, PostgreSQL schema, Understat scraper for Ligue 1 2024-25 player season stats (pivoted from FBref/Eredivisie after FBref's advanced-stats shutdown — see known issues above)
+---
+
+## ⚠️ Known Limitations
+
+- **Attack/creation stats only** — Understat provides goals, xG, assists, xA, shots, and key passes. No tackles, interceptions, or aerial data. The engine is meaningfully more informative for forwards and attacking midfielders than for defenders.
+- **~15% of players have no market value** — players who scored Understat stats for a Ligue 1 club in 2024-25 but have since transferred won't appear on any current squad page on Transfermarkt, so they end up without a market value match. This is a structural scraping limitation, not a bug.
+- **Contract expiry unavailable** — Transfermarkt's squad-table view doesn't include contract dates. Getting this data would require scraping each player's individual profile page (~600 extra requests), deferred as future work.
+
+---
+
+## 👤 Author
+
+**Ritvik Shetty**
+[LinkedIn](https://www.linkedin.com/in/ritvikshetty23/) · [GitHub](https://github.com/RitvikShetty17)
