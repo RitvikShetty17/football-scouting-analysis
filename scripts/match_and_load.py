@@ -196,6 +196,17 @@ def load_to_postgres(understat_df: pd.DataFrame, match_df: pd.DataFrame):
 
             if row["player_name"] in match_lookup.index:
                 m = match_lookup.loc[row["player_name"]]
+                # Delete any existing market data for this player first - this INSERT
+                # has no natural unique key to use ON CONFLICT with (as_of_date changes
+                # every run), so without this, re-running the script repeatedly adds a
+                # duplicate row per player every time instead of replacing it. That
+                # silently fanned out the LEFT JOIN in load_player_pool() and inflated
+                # row counts (caught when a snapshot export showed more rows than the
+                # total number of players that exist).
+                conn.execute(
+                    text("DELETE FROM player_market_data WHERE player_id = :player_id"),
+                    {"player_id": player_id},
+                )
                 conn.execute(
                     text("""
                         INSERT INTO player_market_data

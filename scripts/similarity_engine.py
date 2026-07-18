@@ -47,7 +47,14 @@ def parse_primary_position(position_str: str):
 
 def load_player_pool(engine) -> pd.DataFrame:
     """Pull players + season stats + market data (left join - not everyone matched
-    to a Transfermarkt record) from PostgreSQL."""
+    to a Transfermarkt record) from PostgreSQL.
+
+    The market data join deliberately takes only the latest row per player (via
+    DISTINCT ON) rather than a plain join. This is defense-in-depth: match_and_load.py
+    now deletes old rows before inserting, but this query staying immune to
+    duplicates too means a future bug in that script can't silently fan out these
+    results again the way it did before (688 rows appeared for a 542-player pool
+    when a missing dedup guard let market data rows accumulate across re-runs)."""
     query = text("""
         SELECT p.player_id, p.full_name, p.position, p.birth_date, t.team_name,
                s.minutes_played, s.goals_per90, s.assists_per90, s.xg_per90,
@@ -56,7 +63,11 @@ def load_player_pool(engine) -> pd.DataFrame:
         FROM players p
         JOIN player_season_stats s ON p.player_id = s.player_id
         LEFT JOIN teams t ON p.team_id = t.team_id
-        LEFT JOIN player_market_data m ON p.player_id = m.player_id
+        LEFT JOIN (
+            SELECT DISTINCT ON (player_id) *
+            FROM player_market_data
+            ORDER BY player_id, market_id DESC
+        ) m ON p.player_id = m.player_id
     """)
     with engine.connect() as conn:
         df = pd.read_sql(query, conn)
