@@ -5,6 +5,12 @@ Reuses the exact same computation functions as the CLI (scripts/similarity_engin
 rather than reimplementing any logic here - the app is a thin display layer over
 the same tested pipeline.
 
+Data source: this app reads from a static snapshot (data/processed/player_pool_snapshot.csv)
+rather than querying PostgreSQL live. Streamlit Community Cloud can't reach a local
+database - it runs on Streamlit's own servers with no network path back to your
+machine. Run scripts/export_snapshot.py against your local DB whenever you want the
+deployed app to reflect fresh data, then redeploy.
+
 Known gap: contract expiry isn't available. Transfermarkt's squad-table view only
 has birth date, joined date, and transfer history - not contract dates. Getting
 that would mean scraping every player's individual profile page (~600 extra
@@ -12,42 +18,36 @@ requests), deferred as documented future work. Age IS available and used here,
 via the birth_date column added after inspecting the real page structure.
 """
 
+import json
 import os
 import sys
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from dotenv import load_dotenv
-from sqlalchemy import create_engine
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
 from similarity_engine import (
     FEATURE_COLS,
     MIN_MINUTES,
-    load_player_pool,
-    prepare_pool,
-    compute_percentiles,
-    compute_value_efficiency,
     compute_similar_players,
 )
 
-load_dotenv()
-
 st.set_page_config(page_title="ValueScout", layout="wide")
+
+SNAPSHOT_FILE = "data/processed/player_pool_snapshot.csv"
+META_FILE = "data/processed/snapshot_meta.json"
 
 
 @st.cache_data(ttl=3600)
 def get_prepared_pool() -> pd.DataFrame:
-    db_url = os.getenv("DATABASE_URL")
-    if not db_url:
-        st.error("No DATABASE_URL found. Copy .env.example to .env and fill in your connection string.")
+    if not os.path.exists(SNAPSHOT_FILE):
+        st.error(
+            f"No data snapshot found at {SNAPSHOT_FILE}. Run "
+            "`python scripts/export_snapshot.py` against your local database first."
+        )
         st.stop()
-    engine = create_engine(db_url)
-    df = load_player_pool(engine)
-    df = prepare_pool(df)
-    df = compute_percentiles(df)
-    df = compute_value_efficiency(df)
+    df = pd.read_csv(SNAPSHOT_FILE)
     return df
 
 
@@ -93,6 +93,13 @@ def main():
 
     with st.sidebar:
         st.header("Filters")
+
+        if os.path.exists(META_FILE):
+            with open(META_FILE) as f:
+                meta = json.load(f)
+            exported_date = meta["exported_at"][:10]
+            st.caption(f"Data as of: {exported_date} ({meta['row_count']} players)")
+
         top_n = st.slider("Number of comps to show", min_value=3, max_value=20, value=10)
 
         max_value_available = df["market_value_eur"].max()
