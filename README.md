@@ -5,9 +5,13 @@
 ![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)
 ![Plotly](https://img.shields.io/badge/Plotly-3F4F75?style=for-the-badge&logo=plotly&logoColor=white)
 
+**[🔴 Try it live →](https://football-scouting-analysis.streamlit.app/)**
+
 A statistical scouting tool that identifies cheaper, statistically-similar alternatives to a target player — built to mirror the kind of similarity and value analysis used by real recruitment analytics departments.
 
 **Scope:** Ligue 1, 2024–25 season · ~600 players across 18 clubs
+
+**Try it:** search **"Lee Kang-in"** — the top result, Gaëtan Perrin (Auxerre, ~€8M), is a genuinely comparable statistical profile to a player valued at ~€25M. That gap is the actual thing this tool is built to surface.
 
 ---
 
@@ -49,11 +53,20 @@ scrape_understat.py            scrape_transfermarkt.py
     ranking, Euclidean distance, value
     efficiency scoring)
                    │
-                   ▼
-              app.py
-         (Streamlit UI +
-          Plotly radar charts)
+          ┌────────┴────────┐
+          ▼                 ▼
+   export_snapshot.py    CLI (direct
+   (DB → static CSV       DB query for
+    for deployment)       local use)
+          │
+          ▼
+        app.py
+   (Streamlit UI +
+    Plotly radar charts)
 ```
+
+The deployed app reads from a static CSV snapshot rather than querying PostgreSQL live,
+since Streamlit Community Cloud can't reach a local database — see **Deployment** below.
 
 ---
 
@@ -77,12 +90,15 @@ football-scouting-analysis/
 │   ├── scrape_understat.py       # Pull Ligue 1 player stats via understatapi
 │   ├── scrape_transfermarkt.py   # Scrape market value + birth date per club
 │   ├── match_and_load.py         # Fuzzy name matching + PostgreSQL load
-│   └── similarity_engine.py      # Core similarity engine (CLI + shared logic)
+│   ├── similarity_engine.py      # Core similarity engine (CLI + shared logic)
+│   └── export_snapshot.py        # DB → static CSV snapshot, for deployment
 ├── sql/
 │   └── schema.sql                # PostgreSQL schema (4 tables + indexes)
-├── app.py                        # Streamlit UI
-├── requirements.txt
-└── .env.example                  # DB connection + API key template
+├── data/processed/               # committed: the deployed app's data snapshot
+├── app.py                        # Streamlit UI (reads the static snapshot)
+├── requirements.txt              # app-only deps (what Streamlit Cloud installs)
+├── requirements-dev.txt          # full pipeline deps (scraping, DB, matching)
+└── .env.example                  # DB connection template (local pipeline only)
 ```
 
 ---
@@ -110,34 +126,60 @@ football-scouting-analysis/
 
 ## 🚀 Setup
 
+**Just to run the app** (against the committed data snapshot — no database needed):
 ```bash
-# Clone and install
 git clone https://github.com/RitvikShetty17/football-scouting-analysis
 cd football-scouting-analysis
 python -m venv venv
 source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-
-# Configure environment
-cp .env.example .env
-# Edit .env → add DATABASE_URL (PostgreSQL connection string)
-
-# Run the pipeline
-python scripts/scrape_understat.py         # Pull Understat stats
-python scripts/scrape_transfermarkt.py     # Scrape Transfermarkt
-python scripts/match_and_load.py           # Match names + load to PostgreSQL
-
-# Launch the app
 streamlit run app.py
 ```
+
+**For the full pipeline** (re-scraping, re-matching, refreshing the database):
+```bash
+pip install -r requirements-dev.txt
+cp .env.example .env
+# edit .env → add DATABASE_URL (PostgreSQL connection string)
+
+python scripts/scrape_understat.py
+python scripts/scrape_transfermarkt.py
+python scripts/match_and_load.py
+python scripts/export_snapshot.py    # regenerate the app's data snapshot
+```
+
+---
+
+## 🌐 Deployment
+
+The live app reads from `data/processed/player_pool_snapshot.csv` rather than querying
+PostgreSQL directly, since Streamlit Community Cloud has no network path back to a local
+database. To publish fresh data:
+
+```bash
+python scripts/export_snapshot.py
+git add data/processed/
+git commit -m "Refresh data snapshot"
+git push   # Streamlit Cloud auto-redeploys on push
+```
+
+First-time deploy: push to GitHub → share.streamlit.io → connect repo → main file `app.py`
+→ in Advanced Settings, explicitly select **Python 3.12** (newer Python versions may lack
+prebuilt wheels for some pinned dependencies).
 
 ---
 
 ## ⚠️ Known Limitations
 
-- **Attack/creation stats only** — Understat provides goals, xG, assists, xA, shots, and key passes. No tackles, interceptions, or aerial data. The engine is meaningfully more informative for forwards and attacking midfielders than for defenders.
-- **~15% of players have no market value** — players who scored Understat stats for a Ligue 1 club in 2024-25 but have since transferred won't appear on any current squad page on Transfermarkt, so they end up without a market value match. This is a structural scraping limitation, not a bug.
-- **Contract expiry unavailable** — Transfermarkt's squad-table view doesn't include contract dates. Getting this data would require scraping each player's individual profile page (~600 extra requests), deferred as future work.
+- **Attack/creation stats only** — Understat provides goals, xG, assists, xA, shots, and key passes. No tackles, interceptions, or aerial data. The engine is meaningfully more informative for forwards and attacking midfielders than for defenders, and the app surfaces an explicit warning when comping a defender/goalkeeper rather than leaving this as a silent blind spot.
+- **~15% of players have no market value** — players who scored Understat stats for a Ligue 1 club in 2024-25 but have since transferred won't appear on any current squad page on Transfermarkt, so they end up without a market value match. This is a structural scraping limitation (current roster vs. historical), not a bug.
+- **Contract expiry unavailable** — confirmed by inspecting Transfermarkt's actual page structure: the squad view has birth date, joined date, and transfer history, but not contract dates. Getting this would require scraping each player's individual profile page (~600 extra requests instead of ~18), deferred as documented future work.
+- **Built on a mid-project data source pivot** — this project originally targeted FBref + Eredivisie. On Jan 20, 2026, FBref's data provider (Opta) terminated its licensing agreement, and FBref deleted all advanced stats site-wide. The project migrated to Understat, which only covers the Big-5 leagues + RFPL — hence the Ligue 1 scope. Full detail in `scripts/scrape_understat.py`.
+
+## Possible next steps
+- Explainability layer (e.g. SHAP or regression residuals) for "why is this player undervalued" in plain language
+- Retroactive validation against a real past transfer
+- Contract-expiry data via player profile page scraping
 
 ---
 
