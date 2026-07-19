@@ -19,10 +19,6 @@ import os
 import sys
 import pandas as pd
 import numpy as np
-from sqlalchemy import create_engine, text
-from dotenv import load_dotenv
-
-load_dotenv()
 
 MIN_MINUTES = 450  # ~5 full matches - below this, per-90 rates are too noisy to trust
 
@@ -49,12 +45,19 @@ def load_player_pool(engine) -> pd.DataFrame:
     """Pull players + season stats + market data (left join - not everyone matched
     to a Transfermarkt record) from PostgreSQL.
 
+    sqlalchemy is imported locally here rather than at module level, so that
+    app.py (which only needs the pure computation functions below, via a static
+    CSV snapshot) doesn't require sqlalchemy/psycopg2 to be installed at all -
+    those are dev-only dependencies for the DB-connected pipeline scripts.
+
     The market data join deliberately takes only the latest row per player (via
     DISTINCT ON) rather than a plain join. This is defense-in-depth: match_and_load.py
     now deletes old rows before inserting, but this query staying immune to
     duplicates too means a future bug in that script can't silently fan out these
     results again the way it did before (688 rows appeared for a 542-player pool
     when a missing dedup guard let market data rows accumulate across re-runs)."""
+    from sqlalchemy import text
+
     query = text("""
         SELECT p.player_id, p.full_name, p.position, p.birth_date, t.team_name,
                s.minutes_played, s.goals_per90, s.assists_per90, s.xg_per90,
@@ -184,6 +187,10 @@ def print_comps(target: pd.Series, pool: pd.DataFrame, other_matches: list, top_
 
 
 def main():
+    from sqlalchemy import create_engine
+    from dotenv import load_dotenv
+    load_dotenv()
+
     if len(sys.argv) < 2:
         print("Usage: python scripts/similarity_engine.py \"Player Name\"")
         sys.exit(1)
